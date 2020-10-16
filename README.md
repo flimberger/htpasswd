@@ -24,10 +24,6 @@ This project is still in the early stages of its development.
 Apart from the known issues listed below,
 there may be unknown reliability or performance issues.
 
-- The terminal echo on passwort entry is active.
-  This is a security risk!
-  Workaround:
-  Use the `-i` option to pass the password on `stdin` instead.
 - The *md5crypt* scheme is not implemented.
   Unfortunately,
   this is the default scheme,

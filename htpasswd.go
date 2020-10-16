@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/ssh/terminal"
 )
 
 type hashfunc func(string) (string, error)
@@ -229,11 +230,7 @@ func selectHashAlgorithmFromFlags() (hashfunc, bool) {
 
 func readLine(scanner *bufio.Scanner) (string, error) {
 	if !scanner.Scan() {
-		err := scanner.Err()
-		if err != nil {
-			return "", err
-		}
-		os.Exit(4) // count this as interrupted for now
+		return "", scanner.Err()
 	}
 	return scanner.Text(), nil
 }
@@ -243,27 +240,32 @@ func readPassword() (string, error) {
 	if *scriptMode {
 		return readLine(scanner)
 	}
+	fd := int(os.Stdin.Fd())
 	if *verifyPasswordFlag {
 		fmt.Printf("Enter password:")
-		// TODO: echo off
-		return readLine(scanner)
+		pw, err := terminal.ReadPassword(fd)
+		fmt.Println()
+		if err != nil {
+			return "", err
+		}
+		return string(pw), nil
 	}
 	fmt.Printf("New password:")
-	// TODO: echo off
-	pw, err := readLine(scanner)
+	pw, err := terminal.ReadPassword(fd)
+	fmt.Println()
 	if err != nil {
 		return "", err
 	}
 	fmt.Printf("Re-type new password:")
-	// TODO: echo off
-	pw2, err := readLine(scanner)
+	pw2, err := terminal.ReadPassword(fd)
+	fmt.Println()
 	if err != nil {
 		return "", err
 	}
-	if pw != pw2 {
+	if bytes.Compare(pw, pw2) != 0 {
 		return "", errVerificationFailed
 	}
-	return pw, nil
+	return string(pw), nil
 }
 
 func readPasswdFile(filename string) ([]pwent, error) {
