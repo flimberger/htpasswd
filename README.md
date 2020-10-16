@@ -20,16 +20,9 @@ the `htpasswd` utility.
 
 ## Known Issues
 
-This project is still in the early stages of its development.
-Apart from the known issues listed below,
+This project is still in the early stages of its development,
 there may be unknown reliability or performance issues.
 
-- The *md5crypt* scheme is not implemented.
-  Unfortunately,
-  this is the default scheme,
-  so be sure to specify one of the options to change the hash algorithm.
-  Although everything but `-B` is unsafe anyway,
-  but we want to be compatible...
 - The flags are implemented using the standard libraries `flag` package.
   This means `getopt(3)`-like flag grouping is not supported.
 - Windows support is completely missing.

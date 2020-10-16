@@ -80,7 +80,7 @@ var deleteUserFlag = flag.Bool("D", false, "delete user")
 var verifyPasswordFlag = flag.Bool("v", false, "verify the given password")
 
 var randSeeded = false
-var crypt64Encoding = base64.NewEncoding(crypt64Alphabet)
+var crypt64Encoding = base64.NewEncoding(crypt64Alphabet).WithPadding(base64.NoPadding)
 var errVerificationFailed = fmt.Errorf("password verification error")
 
 func (e *formatError) Error() string {
@@ -97,32 +97,109 @@ func seed() {
 	}
 }
 
-func b64Encode(hash []byte, encoding *base64.Encoding) string {
-	var buf bytes.Buffer
-	encoder := base64.NewEncoder(encoding, &buf)
-	encoder.Write(hash)
-	encoder.Close()
-	return buf.String()
+func bzero(mem []byte) {
+	for i := 0; i < len(mem); i++ {
+		mem[i] = 0
+	}
 }
 
-func md5Impl(pw, salt string) (string, error) {
-	// TODO: this is default md5, but htpasswd uses a modified variant
-	res := md5.Sum([]byte(salt + pw))
-	return fmt.Sprintf("$apr1$%s$%s", salt, b64Encode(res[:], crypt64Encoding)), nil
+func hash64Transpose(buf []byte, a, b, c int) uint {
+	return uint(buf[a]) << 16 | uint(buf[b]) << 8 | uint(buf[c])
 }
 
-func md5Func(pw string) (string, error) {
+func toHash64(buf []byte, v uint, nBytes int) int {
+	for i := 0; i < nBytes; i++ {
+		buf[i] = crypt64Alphabet[v & 0x3f];
+		v >>= 6
+	}
+	return nBytes
+}
+
+func md5cryptImpl(pw, salt []byte) (string, error) {
+	// https://passlib.readthedocs.io/en/stable/lib/passlib.hash.md5_crypt.html#algorithm
+	if len(salt) > 8 {
+		salt = salt[:8]
+	}
+
+	hash := md5.New()
+	hash.Write(pw)
+	hash.Write(salt)
+	hash.Write(pw)
+	digest := hash.Sum(nil)
+
+	hash.Reset()
+	hash.Write(pw)
+	hash.Write([]byte("$apr1$"))
+	hash.Write(salt)
+	for i := 0; i < (len(pw) / 16); i++ {
+		hash.Write(digest)
+	}
+	if n := len(pw) % 16; n > 0 {
+		hash.Write(digest[:n])
+	}
+	bzero(digest)
+	// Apache/FreeBSD source code and passlib docs don't agree on the order.
+	buf := [2]byte{pw[0], 0}
+	for n := len(pw); n != 0; n >>= 1 {
+		hash.Write([]byte{buf[n & 0x01]})
+	}
+	digest = hash.Sum(nil)
+
+	for i := 0; i < 1000; i++ {
+		hash.Reset()
+		if i & 0x01 == 1 {
+			hash.Write(pw)
+		} else {
+			hash.Write(digest)
+		}
+		if i % 3 != 0 {
+			hash.Write(salt)
+		}
+		if i % 7 != 0 {
+			hash.Write(pw)
+		}
+		if i & 0x01 == 1 {
+			hash.Write(digest)
+		} else {
+			hash.Write(pw)
+		}
+		// Because Go is GC'd, we do not actually overwrite the buffer contents,
+		// so we actually clear the contents before overwriting the data in the buffer.
+		bzero(digest)
+		digest = hash.Sum(nil)
+	}
+
+	// The base64 encoding in the standard library uses another byte ordering,
+	// which does not match the one used by md5crypt.
+	// Pythons `passlib` (https://passlib.readthedocs.io) specifically distinguishes between
+	// big and little endian encoding,
+	// while `go-http-auth` (https://github.com/abbot/go-http-auth) just re-implements the
+	// behaviour of the original md5crypt.
+	// I am not sure which behaviour is more portable, but for simplicity I also chose the latter.
+	res := make([]byte, 22)
+	n := 0
+	n += toHash64(res, hash64Transpose(digest, 0, 6, 12), 4)
+	n += toHash64(res[n:], hash64Transpose(digest, 1, 7, 13), 4)
+	n += toHash64(res[n:], hash64Transpose(digest, 2, 8, 14), 4)
+	n += toHash64(res[n:], hash64Transpose(digest, 3, 9, 15), 4)
+	n += toHash64(res[n:], hash64Transpose(digest, 4, 10, 5), 4)
+	toHash64(res[n:], uint(digest[11]), 2)
+	bzero(digest)
+
+	return fmt.Sprintf("$apr1$%s$%s", string(salt), string(res)), nil
+}
+
+func md5cryptFunc(pw string) (string, error) {
 	seed()
-	saltb := [6]byte{}
-	rand.Read(saltb[:])
-	salt := b64Encode(saltb[:], crypt64Encoding)
-	fmt.Fprintf(os.Stderr, "salt encoded length: %d\n", len(salt))
-	return md5Impl(pw, salt[:8])
+	salt := [8]byte{}
+	rand.Read(salt[:])
+	str := crypt64Encoding.EncodeToString(salt[:])
+	return md5cryptImpl([]byte(pw), []byte(str))
 }
 
-func md5Compare(pw, hash string) error {
+func md5cryptCompare(pw, hash string) error {
 	salt := strings.Split(hash, "$")[2]
-	pwhash, err := md5Impl(pw, salt)
+	pwhash, err := md5cryptImpl([]byte(pw), []byte(salt))
 	if err == nil && hash != pwhash {
 		err = errVerificationFailed
 	}
@@ -168,7 +245,7 @@ func crypt3Func(pw string) (string, error) {
 	}
 	data := make([]byte, blk.BlockSize())
 	blk.Encrypt(data, data)
-	return b64Encode(data, crypt64Encoding), nil
+	return crypt64Encoding.EncodeToString(data), nil
 }
 
 func crypt3Compare(pw, hash string) error {
@@ -181,7 +258,7 @@ func crypt3Compare(pw, hash string) error {
 
 func shaFunc(pw string) (string, error) {
 	res := sha1.Sum([]byte(pw))
-	return "{SHA}" + b64Encode(res[:], base64.StdEncoding), nil
+	return "{SHA}" + base64.StdEncoding.EncodeToString(res[:]), nil
 }
 
 func shaCompare(pw, hash string) error {
@@ -205,7 +282,7 @@ func plainCompare(pw, other string) error {
 
 func selectHashAlgorithmFromFlags() (hashfunc, bool) {
 	allFlags := []algorithm{
-		algorithm{*hashMd5, md5Func},
+		algorithm{*hashMd5, md5cryptFunc},
 		algorithm{*hashBcrypt, bcryptFunc},
 		algorithm{*hashCrypt3, crypt3Func},
 		algorithm{*hashSha, shaFunc},
@@ -223,7 +300,7 @@ func selectHashAlgorithmFromFlags() (hashfunc, bool) {
 		}
 	}
 	if hf == nil {
-		hf = md5Func
+		hf = md5cryptFunc
 	}
 	return hf, true
 }
@@ -416,7 +493,7 @@ func verifyPassword(filename, username, password string) error {
 				}
 				switch l[1] {
 				case "apr1":
-					cf = md5Compare
+					cf = md5cryptCompare
 				case "2y":
 					cf = bcryptCompare
 				default:
