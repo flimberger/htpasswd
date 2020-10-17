@@ -29,9 +29,11 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,8 +42,8 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 )
 
-type hashfunc func(string) (string, error)
-type comparefunc func(string, string) error
+type hashfunc func([]byte) ([]byte, error)
+type checkfunc func([]byte, []byte) error
 
 type algorithm struct {
 	enabled  bool
@@ -49,8 +51,8 @@ type algorithm struct {
 }
 
 type pwent struct {
-	user   string
-	pwhash string
+	pwline []byte
+	sepIdx int
 }
 
 type formatError struct {
@@ -91,10 +93,34 @@ func (e *userError) Error() string {
 	return fmt.Sprintf("User %s not found\n", e.username)
 }
 
+func (pe *pwent) user() []byte {
+	return pe.pwline[:pe.sepIdx]
+}
+
+func (pe *pwent) pwhash() []byte {
+	return pe.pwline[:pe.sepIdx]
+}
+
+func newpwline(user, pwhash []byte) ([]byte, int) {
+	userLen := len(user)
+	pwline := make([]byte, 0, userLen+len(pwhash)+1)
+	buf := bytes.NewBuffer(pwline)
+	buf.Write(user)
+	buf.WriteRune(':')
+	buf.Write(pwhash)
+	return buf.Bytes(), userLen
+}
+
 func seed() {
 	if !randSeeded {
 		rand.Seed(time.Now().UnixNano() + int64(os.Getpid()))
 	}
+}
+
+func encode(enc *base64.Encoding, data []byte) []byte {
+	buf := make([]byte, enc.EncodedLen(len(data)))
+	enc.Encode(buf, data)
+	return buf
 }
 
 func bzero(mem []byte) {
@@ -104,18 +130,19 @@ func bzero(mem []byte) {
 }
 
 func hash64Transpose(buf []byte, a, b, c int) uint {
-	return uint(buf[a]) << 16 | uint(buf[b]) << 8 | uint(buf[c])
+	return uint(buf[a])<<16 | uint(buf[b])<<8 | uint(buf[c])
 }
 
-func toHash64(buf []byte, v uint, nBytes int) int {
+func toHash64(w io.Writer, v uint, nBytes int) {
+	buf := [4]byte{}
 	for i := 0; i < nBytes; i++ {
-		buf[i] = crypt64Alphabet[v & 0x3f];
+		buf[i] = crypt64Alphabet[v&0x3f]
 		v >>= 6
 	}
-	return nBytes
+	w.Write(buf[:nBytes])
 }
 
-func md5cryptImpl(pw, salt []byte) (string, error) {
+func md5cryptImpl(pw, salt []byte) ([]byte, error) {
 	// https://passlib.readthedocs.io/en/stable/lib/passlib.hash.md5_crypt.html#algorithm
 	if len(salt) > 8 {
 		salt = salt[:8]
@@ -141,24 +168,24 @@ func md5cryptImpl(pw, salt []byte) (string, error) {
 	// Apache/FreeBSD source code and passlib docs don't agree on the order.
 	buf := [2]byte{pw[0], 0}
 	for n := len(pw); n != 0; n >>= 1 {
-		hash.Write([]byte{buf[n & 0x01]})
+		hash.Write([]byte{buf[n&0x01]})
 	}
 	digest = hash.Sum(nil)
 
 	for i := 0; i < 1000; i++ {
 		hash.Reset()
-		if i & 0x01 == 1 {
+		if i&0x01 == 1 {
 			hash.Write(pw)
 		} else {
 			hash.Write(digest)
 		}
-		if i % 3 != 0 {
+		if i%3 != 0 {
 			hash.Write(salt)
 		}
-		if i % 7 != 0 {
+		if i%7 != 0 {
 			hash.Write(pw)
 		}
-		if i & 0x01 == 1 {
+		if i&0x01 == 1 {
 			hash.Write(digest)
 		} else {
 			hash.Write(pw)
@@ -169,6 +196,11 @@ func md5cryptImpl(pw, salt []byte) (string, error) {
 		digest = hash.Sum(nil)
 	}
 
+	res := bytes.NewBuffer(make([]byte, 0, 22))
+	res.WriteString("$apr1$")
+	res.Write(salt)
+	res.WriteRune('$')
+
 	// The base64 encoding in the standard library uses another byte ordering,
 	// which does not match the one used by md5crypt.
 	// Pythons `passlib` (https://passlib.readthedocs.io) specifically distinguishes between
@@ -176,50 +208,54 @@ func md5cryptImpl(pw, salt []byte) (string, error) {
 	// while `go-http-auth` (https://github.com/abbot/go-http-auth) just re-implements the
 	// behaviour of the original md5crypt.
 	// I am not sure which behaviour is more portable, but for simplicity I also chose the latter.
-	res := make([]byte, 22)
-	n := 0
-	n += toHash64(res, hash64Transpose(digest, 0, 6, 12), 4)
-	n += toHash64(res[n:], hash64Transpose(digest, 1, 7, 13), 4)
-	n += toHash64(res[n:], hash64Transpose(digest, 2, 8, 14), 4)
-	n += toHash64(res[n:], hash64Transpose(digest, 3, 9, 15), 4)
-	n += toHash64(res[n:], hash64Transpose(digest, 4, 10, 5), 4)
-	toHash64(res[n:], uint(digest[11]), 2)
+	toHash64(res, hash64Transpose(digest, 0, 6, 12), 4)
+	toHash64(res, hash64Transpose(digest, 1, 7, 13), 4)
+	toHash64(res, hash64Transpose(digest, 2, 8, 14), 4)
+	toHash64(res, hash64Transpose(digest, 3, 9, 15), 4)
+	toHash64(res, hash64Transpose(digest, 4, 10, 5), 4)
+	toHash64(res, uint(digest[11]), 2)
 	bzero(digest)
 
-	return fmt.Sprintf("$apr1$%s$%s", string(salt), string(res)), nil
+	return res.Bytes(), nil
 }
 
-func md5cryptFunc(pw string) (string, error) {
+func md5cryptFunc(pw []byte) ([]byte, error) {
 	seed()
-	salt := [8]byte{}
-	rand.Read(salt[:])
-	str := crypt64Encoding.EncodeToString(salt[:])
-	return md5cryptImpl([]byte(pw), []byte(str))
+	binSalt := [8]byte{}
+	rand.Read(binSalt[:])
+	salt := make([]byte, 0, crypt64Encoding.EncodedLen(8))
+	crypt64Encoding.Encode(salt, binSalt[:])
+	return md5cryptImpl(pw, salt)
 }
 
-func md5cryptCompare(pw, hash string) error {
-	salt := strings.Split(hash, "$")[2]
-	pwhash, err := md5cryptImpl([]byte(pw), []byte(salt))
-	if err == nil && hash != pwhash {
+func md5cryptCompare(pw, hash []byte) error {
+	salt := bytes.Split(hash, []byte("$"))[2]
+	pwhash, err := md5cryptImpl(pw, salt)
+	if err == nil && bytes.Compare(hash, pwhash) != 0 {
 		err = errVerificationFailed
 	}
 	return err
 }
 
-func bcryptFunc(pw string) (string, error) {
+func bcryptFunc(pw []byte) ([]byte, error) {
 	cost := *bcryptCost
 	if cost < 4 || cost > 17 {
-		return "", fmt.Errorf("Unable to encode with bcrypt: Invalid argument")
+		return []byte{}, fmt.Errorf("Unable to encode with bcrypt: Invalid argument")
 	}
-	res, err := bcrypt.GenerateFromPassword([]byte(pw), cost)
+	res, err := bcrypt.GenerateFromPassword(pw, cost)
 	if err != nil {
-		return "", fmt.Errorf("bcrypt: %v", err)
+		return []byte{}, fmt.Errorf("bcrypt: %v", err)
 	}
-	return fmt.Sprintf("$%s$%02d$%s", "2y", cost, string(res)), nil
+	buf := bytes.NewBuffer(make([]byte, 0, 60))
+	buf.WriteString("$2y$")
+	buf.WriteString(strconv.Itoa(cost))
+	buf.WriteRune('$')
+	buf.Write(res)
+	return buf.Bytes(), nil
 }
 
-func bcryptCompare(pw, hash string) error {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw))
+func bcryptCompare(pw, hash []byte) error {
+	err := bcrypt.CompareHashAndPassword(hash, pw)
 	if err != nil {
 		switch err {
 		case bcrypt.ErrMismatchedHashAndPassword:
@@ -235,49 +271,51 @@ func bcryptCompare(pw, hash string) error {
 	return err
 }
 
-func crypt3Func(pw string) (string, error) {
+func crypt3Func(pw []byte) ([]byte, error) {
 	if len(pw) > 8 {
 		pw = pw[:8]
 	}
-	blk, err := des.NewCipher([]byte(pw))
+	blk, err := des.NewCipher(pw)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	data := make([]byte, blk.BlockSize())
 	blk.Encrypt(data, data)
-	return crypt64Encoding.EncodeToString(data), nil
+	return encode(crypt64Encoding, data), nil
 }
 
-func crypt3Compare(pw, hash string) error {
+func crypt3Compare(pw, hash []byte) error {
 	pwhash, err := crypt3Func(pw)
-	if err == nil && hash != pwhash {
+	if err == nil && bytes.Compare(hash, pwhash) != 0 {
 		err = errVerificationFailed
 	}
 	return err
 }
 
-func shaFunc(pw string) (string, error) {
-	res := sha1.Sum([]byte(pw))
-	return "{SHA}" + base64.StdEncoding.EncodeToString(res[:]), nil
+func shaFunc(pw []byte) ([]byte, error) {
+	res := sha1.Sum(pw)
+	buf := bytes.NewBuffer([]byte("{SHA}"))
+	buf.Write(encode(base64.StdEncoding, res[:]))
+	return buf.Bytes(), nil
 }
 
-func shaCompare(pw, hash string) error {
+func shaCompare(pw, hash []byte) error {
 	pwhash, err := shaFunc(pw)
-	if err == nil && hash != pwhash {
+	if err == nil && bytes.Compare(hash, pwhash) != 0 {
 		err = errVerificationFailed
 	}
 	return err
 }
 
-func plainFunc(pw string) (string, error) {
+func plainFunc(pw []byte) ([]byte, error) {
 	return pw, nil
 }
 
-func plainCompare(pw, other string) error {
-	if pw == other {
-		return nil
+func plainCompare(pw, other []byte) error {
+	if bytes.Compare(pw, other) != 0 {
+		return errVerificationFailed
 	}
-	return errVerificationFailed
+	return nil
 }
 
 func selectHashAlgorithmFromFlags() (hashfunc, bool) {
@@ -288,7 +326,7 @@ func selectHashAlgorithmFromFlags() (hashfunc, bool) {
 		algorithm{*hashSha, shaFunc},
 		algorithm{*hashPlain, plainFunc},
 	}
-	var hf hashfunc = nil
+	var hf hashfunc
 	for _, f := range allFlags {
 		if f.enabled {
 			if hf != nil {
@@ -305,14 +343,14 @@ func selectHashAlgorithmFromFlags() (hashfunc, bool) {
 	return hf, true
 }
 
-func readLine(scanner *bufio.Scanner) (string, error) {
+func readLine(scanner *bufio.Scanner) ([]byte, error) {
 	if !scanner.Scan() {
-		return "", scanner.Err()
+		return nil, scanner.Err()
 	}
-	return scanner.Text(), nil
+	return scanner.Bytes(), nil
 }
 
-func readPassword() (string, error) {
+func readPassword() ([]byte, error) {
 	scanner := bufio.NewScanner(os.Stdin)
 	if *scriptMode {
 		return readLine(scanner)
@@ -323,26 +361,26 @@ func readPassword() (string, error) {
 		pw, err := terminal.ReadPassword(fd)
 		fmt.Println()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return string(pw), nil
+		return pw, nil
 	}
 	fmt.Printf("New password:")
 	pw, err := terminal.ReadPassword(fd)
 	fmt.Println()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	fmt.Printf("Re-type new password:")
 	pw2, err := terminal.ReadPassword(fd)
 	fmt.Println()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if bytes.Compare(pw, pw2) != 0 {
-		return "", errVerificationFailed
+		return nil, errVerificationFailed
 	}
-	return string(pw), nil
+	return pw, nil
 }
 
 func readPasswdFile(filename string) ([]pwent, error) {
@@ -355,13 +393,14 @@ func readPasswdFile(filename string) ([]pwent, error) {
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
-	entries := []pwent{}
+	var entries []pwent
 	for scanner.Scan() {
-		pwline := strings.SplitN(scanner.Text(), ":", 2)
-		if len(pwline) != 2 {
+		pwline := scanner.Bytes()
+		i := bytes.IndexByte(pwline, ':')
+		if i == -1 {
 			return nil, &formatError{filename}
 		}
-		entries = append(entries, pwent{pwline[0], pwline[1]})
+		entries = append(entries, pwent{pwline, i})
 	}
 	if err = scanner.Err(); err != nil {
 		return nil, err
@@ -409,7 +448,7 @@ func writeHtpasswdFile(filename string, entries []pwent) error {
 	// write to scratch buffer
 	var buf bytes.Buffer
 	for _, e := range entries {
-		if _, err := fmt.Fprintf(&buf, "%s:%s\n", e.user, e.pwhash); err != nil {
+		if _, err := buf.Write(e.pwline); err != nil {
 			// This should not happen, but who knows how the OS manages memory?
 			return err
 		}
@@ -464,7 +503,8 @@ func deleteUser(filename, username string) error {
 	newEntries := []pwent{}
 	userFound := false
 	for _, e := range entries {
-		if e.user == username {
+		user := string(e.user())
+		if user == username {
 			userFound = true
 		} else {
 			newEntries = append(newEntries, e)
@@ -476,27 +516,28 @@ func deleteUser(filename, username string) error {
 	return &userError{username, 0}
 }
 
-func verifyPassword(filename, username, password string) error {
+func verifyPassword(filename, username string, password []byte) error {
 	entries, err := readPasswdFile(filename)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if e.user == username {
-			var cf comparefunc
-			switch e.pwhash[0] {
+		user := string(e.user())
+		pwhash := e.pwhash()
+		if user == username {
+			var cf checkfunc
+			switch pwhash[0] {
 			case '$':
-				l := strings.Split(e.pwhash, "$")
-				// "$apr1$salt$hash" splits to []string{"", "apr1", "salt", "hash"}
+				l := bytes.Split(pwhash, []byte("$"))
+				// "$apr1$salt$hash" splits to [][]byte{"", "apr1", "salt", "hash"}
 				if len(l) != 4 {
 					return &formatError{filename}
 				}
-				switch l[1] {
-				case "apr1":
+				if bytes.Compare([]byte("apr1"), l[1]) == 0 {
 					cf = md5cryptCompare
-				case "2y":
+				} else if bytes.Compare([]byte("2y"), l[1]) == 0 {
 					cf = bcryptCompare
-				default:
+				} else {
 					return &formatError{filename}
 				}
 			case '{':
@@ -505,7 +546,7 @@ func verifyPassword(filename, username, password string) error {
 				// Plain-text passwords and DES digests look virtually the
 				// same, so just check for the plain-text password first and
 				// it is not a match, try the crypt(3) function.
-				cf = func(pw, hash string) error {
+				cf = func(pw, hash []byte) error {
 					err := plainCompare(pw, hash)
 					if err != nil {
 						err = crypt3Compare(pw, hash)
@@ -513,7 +554,7 @@ func verifyPassword(filename, username, password string) error {
 					return err
 				}
 			}
-			err := cf(password, e.pwhash)
+			err := cf(password, pwhash)
 			if err == errVerificationFailed {
 				fmt.Fprintln(os.Stderr, "password verification failed")
 				os.Exit(3)
@@ -599,7 +640,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "htpasswd: username is too long")
 		os.Exit(6)
 	}
-	if strings.Contains(username, ":") {
+	if strings.ContainsRune(username, ':') {
 		fmt.Fprintln(os.Stderr, "htpasswd: username contains illegal character ':'")
 		os.Exit(6)
 	}
@@ -609,9 +650,9 @@ func main() {
 		exit(err)
 	}
 
-	password := ""
+	var password []byte
 	if *batchMode {
-		password = args[passwordIdx]
+		password = []byte(args[passwordIdx])
 	} else {
 		var err error
 		password, err = readPassword()
@@ -643,13 +684,16 @@ func main() {
 
 	userFound := false
 	for i := 0; i < len(entries); i++ {
-		if entries[i].user == username {
-			entries[i].pwhash = pwhash
+		userStr := string(entries[i].user())
+		if userStr == username {
+			user := entries[i].user()
+			entries[i].pwline, _ = newpwline(user, pwhash)
 			userFound = true
 		}
 	}
 	if !userFound {
-		entries = append(entries, pwent{username, pwhash})
+		pwline, i := newpwline([]byte(username), pwhash)
+		entries = append(entries, pwent{pwline, i})
 	}
 	if err := writeHtpasswdFile(passwdFileName, entries); err != nil {
 		fmt.Fprintf(os.Stderr, "htpasswd: failed to write %s: %v", passwdFileName, err)
