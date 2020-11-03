@@ -101,14 +101,16 @@ func (pe *pwent) pwhash() []byte {
 	return pe.pwline[:pe.sepIdx]
 }
 
-func newpwline(user, pwhash []byte) ([]byte, int) {
+func newpwent(user, pwhash []byte) pwent {
 	userLen := len(user)
-	pwline := make([]byte, 0, userLen+len(pwhash)+1)
-	buf := bytes.NewBuffer(pwline)
-	buf.Write(user)
-	buf.WriteRune(':')
-	buf.Write(pwhash)
-	return buf.Bytes(), userLen
+	e := pwent{
+		pwline: make([]byte, 0, userLen+len(pwhash)+1),
+		sepIdx: userLen,
+	}
+	copy(e.pwline, user)
+	e.pwline[userLen] = ':'
+	copy(e.pwline[userLen+1:], pwhash)
+	return e
 }
 
 func seed() {
@@ -687,13 +689,12 @@ func main() {
 		userStr := string(entries[i].user())
 		if userStr == username {
 			user := entries[i].user()
-			entries[i].pwline, _ = newpwline(user, pwhash)
+			entries[i] = newpwent(user, pwhash)
 			userFound = true
 		}
 	}
 	if !userFound {
-		pwline, i := newpwline([]byte(username), pwhash)
-		entries = append(entries, pwent{pwline, i})
+		entries = append(entries, newpwent([]byte(username), pwhash))
 	}
 	if err := writeHtpasswdFile(passwdFileName, entries); err != nil {
 		fmt.Fprintf(os.Stderr, "htpasswd: failed to write %s: %v", passwdFileName, err)
