@@ -1,0 +1,12 @@
+# CI configuration for builds.sr.ht
+image: alpine/latest
+packages:
+  - make
+  - go
+tasks:
+  - build: |
+      cd htpasswd
+      make
+  - test: |
+      cd htpasswd
+      make test

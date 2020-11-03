@@ -1,9 +1,8 @@
 # htpasswd
 
-A compatible, stand-alone implementation of the Apache htpasswd utility in Go.
+[![builds.sr.ht status](https://builds.sr.ht/~flimberger/htpasswd.svg)](https://builds.sr.ht/~flimberger/htpasswd?)
 
-Version control: https://git.sr.ht/~flimberger/htpasswd
-Issues: https://todo.sr.ht/~flimberger/htpasswd
+A compatible, stand-alone implementation of the Apache htpasswd utility in Go.
 
 ## Motivation and Goals
 
