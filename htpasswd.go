@@ -33,7 +33,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -104,11 +103,11 @@ func (pe *pwent) pwhash() []byte {
 func newpwent(user, pwhash []byte) pwent {
 	userLen := len(user)
 	e := pwent{
-		pwline: make([]byte, 0, userLen+len(pwhash)+1),
+		pwline: make([]byte, userLen+len(pwhash)+1),
 		sepIdx: userLen,
 	}
 	copy(e.pwline, user)
-	e.pwline[userLen] = ':'
+	e.pwline[userLen] = byte(':')
 	copy(e.pwline[userLen+1:], pwhash)
 	return e
 }
@@ -248,12 +247,7 @@ func bcryptFunc(pw []byte) ([]byte, error) {
 	if err != nil {
 		return []byte{}, fmt.Errorf("bcrypt: %v", err)
 	}
-	buf := bytes.NewBuffer(make([]byte, 0, 60))
-	buf.WriteString("$2y$")
-	buf.WriteString(strconv.Itoa(cost))
-	buf.WriteRune('$')
-	buf.Write(res)
-	return buf.Bytes(), nil
+	return res, nil
 }
 
 func bcryptCompare(pw, hash []byte) error {
